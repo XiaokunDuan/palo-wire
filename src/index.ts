@@ -429,6 +429,22 @@ function matchesAnyPattern(value: string, patterns: string[] | undefined): boole
   return patterns.some((pattern) => value.includes(pattern));
 }
 
+function pickRecentOrLatestEntries<T extends { lastmod: string | null }>(
+  entries: T[],
+  limit: number,
+): T[] {
+  const sorted = [...entries].sort(
+    (left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime(),
+  );
+  const recent = sorted.filter((entry) => isWithinLastDay(entry.lastmod));
+
+  if (recent.length > 0) {
+    return recent.slice(0, limit);
+  }
+
+  return sorted.slice(0, limit);
+}
+
 function shouldIgnoreInternalLink(url: URL): boolean {
   const ignoredSegments = [
     "/about",
@@ -591,15 +607,14 @@ async function resolveSitemapUrls(source: Source): Promise<string[]> {
 async function fetchDocumentsFromSitemaps(source: Source): Promise<StructuredDocument[]> {
   const sitemapUrls = await resolveSitemapUrls(source);
   const sitemapXmls = await Promise.all(sitemapUrls.map((url) => fetchXml(url)));
-  const recentEntries = sitemapXmls
+  const candidateEntries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => isWithinLastDay(entry.lastmod))
-    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
-    .slice(0, (source.entry_limit ?? 5) * 2);
+    .filter((entry) => Boolean(entry.url));
+  const selectedEntries = pickRecentOrLatestEntries(candidateEntries, source.entry_limit ?? 5);
 
   const documents = await Promise.all(
-    recentEntries.slice(0, source.entry_limit ?? 5).map((entry) =>
+    selectedEntries.map((entry) =>
       buildDocumentFromEntry(source, {
         title: entry.url,
         url: entry.url,
@@ -620,12 +635,11 @@ function extractNfxBuildId(markup: string): string | null {
 
 async function fetchNfxDocuments(source: Source): Promise<StructuredDocument[]> {
   const sitemapXmls = await Promise.all((source.sitemap_urls ?? []).map((url) => fetchXml(url)));
-  const recentEntries = sitemapXmls
+  const candidateEntries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => isWithinLastDay(entry.lastmod))
-    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
-    .slice(0, source.entry_limit ?? 5);
+    .filter((entry) => Boolean(entry.url));
+  const selectedEntries = pickRecentOrLatestEntries(candidateEntries, source.entry_limit ?? 5);
 
   let metadata = new Map<string, { title: string; summary: string | null }>();
 
@@ -668,7 +682,7 @@ async function fetchNfxDocuments(source: Source): Promise<StructuredDocument[]> 
   }
 
   const documents = await Promise.all(
-    recentEntries.map((entry) =>
+    selectedEntries.map((entry) =>
       buildDocumentFromEntry(source, {
         title: metadata.get(entry.url)?.title ?? entry.url,
         url: entry.url,
