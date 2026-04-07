@@ -1,5 +1,9 @@
 # Palo Wire
 
+> Live site: [silicon.yulu34.top](https://silicon.yulu34.top)  
+> Documents API: [/api/documents](https://silicon.yulu34.top/api/documents)  
+> Source registry: [/api/sources](https://silicon.yulu34.top/api/sources)
+
 Palo Wire is an agent-native source layer for tracking early Silicon Valley signals across product launches, developer communities, startup media, newsletters, podcasts, and venture capital writing.
 
 Instead of building a traditional media site, Palo Wire treats public web sources as inputs to a lightweight intelligence node:
