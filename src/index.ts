@@ -156,8 +156,27 @@ function json(data: unknown, status = 200, maxAge = 60): Response {
   });
 }
 
+function html(markup: string, status = 200, maxAge = 120): Response {
+  return new Response(markup, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": `public, max-age=${maxAge}`,
+    },
+  });
+}
+
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function stripTags(value: string): string {
@@ -1229,13 +1248,402 @@ function overview() {
   };
 }
 
+function renderLanding(): string {
+  const stableCount = allSources.filter((source) => source.stability === "stable").length;
+  const experimentalCount = allSources.filter((source) => source.stability === "experimental").length;
+  const feedsCount = allSources.filter((source) => source.ingest_mode === "rss_feed").length;
+  const sitemapCount = allSources.filter((source) => source.ingest_mode === "xml_sitemap").length;
+  const apiCount = allSources.filter((source) => source.ingest_mode === "official_api").length;
+  const pageDataCount = allSources.filter((source) => source.ingest_mode === "page_data").length;
+
+  const sourceCards = allSources
+    .filter((source) => source.enabled !== false)
+    .map((source) => {
+      const label = `${source.category.toUpperCase()} · ${source.content_channel.replace(/_/g, " ")}`;
+      const mode = source.ingest_mode?.replace(/_/g, " ") ?? "custom";
+      const stability = source.stability ?? "stable";
+
+      return `
+        <article class="source-card">
+          <div class="source-eyebrow">${escapeHtml(label)}</div>
+          <h3>${escapeHtml(source.name)}</h3>
+          <p>${escapeHtml(source.planned_access)}</p>
+          <div class="source-meta">
+            <span>${escapeHtml(mode)}</span>
+            <span>${escapeHtml(stability)}</span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Silicon Sync</title>
+    <meta
+      name="description"
+      content="Silicon Sync is an AI-native signal desk for Silicon Valley tech and VC intelligence, built as a 24-hour rolling source node for agents."
+    >
+    <style>
+      :root {
+        --paper: #f5f1e8;
+        --ink: #111111;
+        --muted: #655f54;
+        --rule: #d8d0c1;
+        --accent: #8d1d1d;
+        --panel: #fbf8f1;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background:
+          linear-gradient(to bottom, rgba(141, 29, 29, 0.05), transparent 140px),
+          var(--paper);
+        color: var(--ink);
+        font-family: Georgia, "Times New Roman", Times, serif;
+      }
+      a { color: inherit; }
+      .page {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px 20px 72px;
+      }
+      .masthead {
+        border-top: 3px double var(--rule);
+        border-bottom: 3px double var(--rule);
+        padding: 12px 0 14px;
+        text-align: center;
+      }
+      .masthead-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+        color: var(--muted);
+        font: 12px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .brand {
+        margin: 0;
+        font-size: clamp(46px, 8vw, 86px);
+        line-height: 0.94;
+        letter-spacing: -0.04em;
+        font-weight: 700;
+      }
+      .subhead {
+        max-width: 760px;
+        margin: 10px auto 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.55;
+      }
+      .hero {
+        display: grid;
+        grid-template-columns: 1.45fr 0.9fr;
+        gap: 28px;
+        padding: 28px 0 32px;
+        border-bottom: 1px solid var(--rule);
+      }
+      .hero-main {
+        padding-right: 28px;
+        border-right: 1px solid var(--rule);
+      }
+      .eyebrow {
+        margin-bottom: 14px;
+        color: var(--accent);
+        font: 12px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+      .hero h2 {
+        margin: 0;
+        font-size: clamp(34px, 5vw, 64px);
+        line-height: 0.98;
+        letter-spacing: -0.03em;
+      }
+      .hero p {
+        margin: 20px 0 0;
+        font-size: 20px;
+        line-height: 1.55;
+      }
+      .hero-side {
+        display: grid;
+        gap: 18px;
+        align-content: start;
+      }
+      .dek, .source-card {
+        background: var(--panel);
+        border: 1px solid var(--rule);
+      }
+      .dek {
+        padding: 18px;
+      }
+      .dek h3, .section h3, .source-card h3 {
+        margin: 0 0 10px;
+        font-size: 24px;
+      }
+      .dek p, .section p, .source-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.65;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 26px;
+      }
+      .button {
+        padding: 12px 16px;
+        text-decoration: none;
+        font: 13px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: white;
+      }
+      .button.secondary {
+        background: transparent;
+        color: var(--ink);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-bottom: 1px solid var(--rule);
+      }
+      .stat {
+        padding: 20px 12px 22px;
+        text-align: center;
+        border-right: 1px solid var(--rule);
+      }
+      .stat:last-child { border-right: 0; }
+      .stat strong {
+        display: block;
+        font-size: clamp(28px, 4vw, 42px);
+        line-height: 1;
+      }
+      .stat span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font: 12px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 0.92fr 1.08fr;
+        gap: 28px;
+        padding-top: 28px;
+      }
+      .section {
+        padding-top: 18px;
+        border-top: 1px solid var(--rule);
+      }
+      .list {
+        list-style: none;
+        margin: 14px 0 0;
+        padding: 0;
+      }
+      .list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--rule);
+        font-size: 16px;
+      }
+      .list small {
+        color: var(--muted);
+        white-space: nowrap;
+        font: 12px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .sources {
+        margin-top: 30px;
+        padding-top: 18px;
+        border-top: 1px solid var(--rule);
+      }
+      .sources-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 18px;
+      }
+      .source-card {
+        padding: 18px;
+      }
+      .source-card h3 { font-size: 22px; }
+      .source-eyebrow, .source-meta {
+        color: var(--muted);
+        font: 12px/1.2 "Helvetica Neue", Helvetica, Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .source-eyebrow { margin-bottom: 10px; }
+      .source-meta {
+        display: flex;
+        gap: 10px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid var(--rule);
+      }
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 36px;
+        padding-top: 16px;
+        border-top: 3px double var(--rule);
+        color: var(--muted);
+        font-size: 14px;
+      }
+      @media (max-width: 980px) {
+        .hero, .grid, .stats, .sources-grid {
+          grid-template-columns: 1fr;
+        }
+        .hero-main, .stat {
+          border-right: 0;
+          padding-right: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="masthead">
+        <div class="masthead-top">
+          <span>Silicon Valley Tech + VC Intelligence</span>
+          <span>24-Hour Rolling Source Node</span>
+          <span>Built For Agents</span>
+        </div>
+        <h1 class="brand">Silicon Sync</h1>
+        <p class="subhead">
+          An AI-native signal desk that continuously collects early signals across product launches,
+          developer communities, startup media, and venture capital writing, then republishes them in a
+          lightweight format that agents can crawl and reason over.
+        </p>
+      </header>
+
+      <section class="hero">
+        <div class="hero-main">
+          <div class="eyebrow">The Lead Story</div>
+          <h2>Not a news site. A structured front page for AI systems watching Silicon Valley.</h2>
+          <p>
+            Silicon Sync is designed to be read by models first. It crawls public sources, keeps only the
+            latest 24 hours of material, and exposes a clean document layer so agents can summarize, rank,
+            compare, and synthesize signals without re-crawling the open web every time.
+          </p>
+          <div class="actions">
+            <a class="button" href="/api/documents">Open Documents API</a>
+            <a class="button secondary" href="/api/sources">Browse Sources</a>
+            <a class="button secondary" href="https://github.com/XiaokunDuan/silicon-sync">View on GitHub</a>
+          </div>
+        </div>
+        <aside class="hero-side">
+          <div class="dek">
+            <h3>What it does</h3>
+            <p>
+              Keeps a rolling intelligence layer for tech and VC sources, with official feeds, sitemaps,
+              vendor APIs, and source-specific parsers replacing brittle homepage scraping.
+            </p>
+          </div>
+          <div class="dek">
+            <h3>What it is not</h3>
+            <p>
+              It is not a human reading product, a dashboard, or a summary engine. The landing page is the
+              presentation layer; the core asset is the crawlable source node behind it.
+            </p>
+          </div>
+        </aside>
+      </section>
+
+      <section class="stats">
+        <div class="stat">
+          <strong>${syncableSources.length}</strong>
+          <span>Auto-Synced Sources</span>
+        </div>
+        <div class="stat">
+          <strong>${stableCount}</strong>
+          <span>Stable Pipelines</span>
+        </div>
+        <div class="stat">
+          <strong>${experimentalCount}</strong>
+          <span>Experimental Pipelines</span>
+        </div>
+        <div class="stat">
+          <strong>24h</strong>
+          <span>Retention Window</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="section">
+          <div class="eyebrow">The System</div>
+          <h3>Built around official entry points whenever possible.</h3>
+          <p>
+            The node prefers feeds, sitemaps, page-data endpoints, and official APIs over HTML scraping.
+            That keeps the signal layer lighter, cheaper, and more durable.
+          </p>
+          <ul class="list">
+            <li><span>RSS feeds for newsletters and transcript-rich sources</span><small>${feedsCount} sources</small></li>
+            <li><span>XML sitemaps for publisher and VC essay networks</span><small>${sitemapCount} sources</small></li>
+            <li><span>Vendor APIs for protected platforms like Product Hunt</span><small>${apiCount} source</small></li>
+            <li><span>Next.js page-data for modern content sites like NFX</span><small>${pageDataCount} source</small></li>
+          </ul>
+        </div>
+
+        <div class="section">
+          <div class="eyebrow">For AI Workflows</div>
+          <h3>Optimized for downstream agents, not manual reading.</h3>
+          <p>
+            Every document is intentionally minimal. Title, content, URL, source identity, document type,
+            and fetch time are enough for ranking, trend extraction, and synthesis.
+          </p>
+          <ul class="list">
+            <li><span><a href="/api/documents">/api/documents</a> for cross-source retrieval</span><small>global feed</small></li>
+            <li><span><a href="/api/sources">/api/sources</a> for source registry and health</span><small>registry</small></li>
+            <li><span><a href="/api/runs/latest">/api/runs/latest</a> for sync visibility</span><small>ops</small></li>
+            <li><span><a href="/api/sources/product-hunt/documents">Product Hunt</a> already runs on the official API</span><small>live now</small></li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="sources">
+        <div class="eyebrow">Tracked Sources</div>
+        <h3 style="margin:0;font-size:36px;line-height:1.05;">A mix of community, launch, media, and investor surfaces.</h3>
+        <p style="margin:10px 0 0;color:var(--muted);max-width:760px;line-height:1.65;">
+          Silicon Sync watches product launches, developer attention, startup reporting, newsletters,
+          podcast networks, and VC writing. The goal is to capture early movement before it becomes consensus.
+        </p>
+        <div class="sources-grid">
+          ${sourceCards}
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>Silicon Sync</span>
+        <span>Agent-native source node for Silicon Valley intelligence</span>
+      </footer>
+    </div>
+  </body>
+</html>`;
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const typedEnv = env as Env;
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return json(overview(), 200, 30);
+      return html(renderLanding(), 200, 120);
     }
 
     if (url.pathname === "/api/sources") {
