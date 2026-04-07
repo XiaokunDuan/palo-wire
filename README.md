@@ -1,86 +1,52 @@
 # Silicon Sync
 
-Silicon Sync is an agent-native source node for tracking early Silicon Valley signals across product launches, developer communities, and venture capital.
+Silicon Sync is an agent-native source layer for tracking early Silicon Valley signals across product launches, developer communities, startup media, newsletters, podcasts, and venture capital writing.
 
-## Positioning
+Instead of building a traditional media site, Silicon Sync treats public web sources as inputs to a lightweight intelligence node:
 
-- No human-facing frontend in v2
-- Scheduled public-source crawling on Cloudflare Workers
-- AI-friendly JSON output for downstream agents and summarizers
-- English-first source preservation to reduce lossy re-interpretation
-- Official-entry-first ingestion: feeds, sitemaps, and vendor APIs before HTML scraping
+- crawl a curated set of high-signal sources
+- prefer official entry points over brittle scraping
+- keep a rolling 24-hour window of output
+- expose minimal JSON documents that downstream agents can crawl, rank, summarize, and synthesize
 
-## What It Does
+The root page is a landing page for humans. The core product is the source node behind it.
 
-- Periodically fetches configured public source pages
-- Extracts page title, meta description, text preview, and outbound links
-- Builds minimal `article` and `podcast` documents for selected high-signal sources
-- Uses source-specific extractors for Product Hunt, a16z, NFX, and sitemap-backed VC sites
-- Stores the latest snapshot for each source in Workers KV
-- Exposes JSON endpoints for sources, snapshots, documents, links, and latest sync runs
+## Why This Exists
 
-## Current Coverage
+Most “trend tracking” products are designed for people to browse manually. That breaks down quickly for agentic workflows:
 
-- Hacker News
-- Product Hunt
-- Y Combinator Launches
-- TechCrunch
-- Crunchbase News
-- a16z
-- Sequoia
-- Lightspeed
-- Benchmark
-- NFX
-- Lenny's Newsletter
-- Lenny's Podcast
-- Latent Space
-- a16z Podcast Network
-- First Round Review
-- Y Combinator Blog
+- the web is noisy
+- source formats are inconsistent
+- high-signal content is scattered across feeds, sitemaps, APIs, and modern app shells
+- agents should not have to rediscover the same public information on every run
 
-## API
+Silicon Sync solves this by maintaining a small, opinionated, continuously refreshed layer of crawlable documents for Silicon Valley tech and VC intelligence.
 
-- `GET /`
-- `GET /api/sources`
-- `GET /api/sources/:id`
-- `GET /api/sources/:id/documents`
-- `GET /api/sources/:id/links`
-- `GET /api/documents`
-- `GET /api/runs/latest`
-- `POST /api/sync`
+In short:
 
-See [docs/api.md](/Users/dxk/code/product/silicon-sync/docs/api.md).
+`Silicon Sync = a 24-hour rolling source node for AI systems watching Silicon Valley.`
 
-## Runtime
+## Design Principles
 
-- Worker entry: [src/index.ts](/Users/dxk/code/product/silicon-sync/src/index.ts)
-- Source registry: [sources/registry.json](/Users/dxk/code/product/silicon-sync/sources/registry.json)
-- Cloudflare config: [wrangler.jsonc](/Users/dxk/code/product/silicon-sync/wrangler.jsonc)
+- `Agent-first`: optimize for downstream model consumption, not dashboard depth.
+- `Official-entry-first`: prefer RSS, XML sitemaps, page-data endpoints, and vendor APIs before HTML scraping.
+- `High-signal only`: track a small number of good sources instead of mirroring the entire web.
+- `Minimal schema`: keep documents lightweight enough for cheap downstream crawling.
+- `Rolling freshness`: default to recent material, but backfill low-frequency sources so they do not go empty.
+- `Cheap to run`: stay within the operational envelope of Cloudflare Workers + KV.
 
-## Local Development
+## What The System Does
 
-```bash
-npm install
-npm run dev
-```
+At a high level, Silicon Sync:
 
-## Deploy
+1. reads a source registry
+2. schedules crawl batches on Cloudflare Workers
+3. uses source-specific ingestion paths per publisher or platform
+4. builds normalized `article` and `podcast` documents
+5. stores only the latest snapshot per source in Workers KV
+6. exposes a simple JSON interface for downstream agents
 
-```bash
-npm run deploy
-```
-
-The worker uses:
-
-- Workers KV for latest source snapshots
-- a cron trigger every 3 hours
-- an optional `SYNC_TOKEN` secret for manual sync
-- an optional `PRODUCT_HUNT_TOKEN` secret for Product Hunt GraphQL ingestion
-- batched sync execution to stay within Worker subrequest limits
-
-## Document Shape
-
-Structured documents are intentionally minimal. Each item keeps only:
+Current output is intentionally small. Each document keeps only:
 
 - `title`
 - `content`
@@ -90,8 +56,239 @@ Structured documents are intentionally minimal. Each item keeps only:
 - `document_type`
 - `fetched_at`
 
-## Retention
+## System Shape
 
-- Structured documents are filtered to the last 24 hours
-- KV entries expire automatically shortly after that window
-- Freshly crawled data is kept; older data rolls off on subsequent syncs
+### Runtime
+
+- Entry point: [src/index.ts](/Users/dxk/code/product/silicon-sync/src/index.ts)
+- Source registry: [sources/registry.json](/Users/dxk/code/product/silicon-sync/sources/registry.json)
+- Worker config: [wrangler.jsonc](/Users/dxk/code/product/silicon-sync/wrangler.jsonc)
+- API reference: [docs/api.md](/Users/dxk/code/product/silicon-sync/docs/api.md)
+- Architecture notes: [docs/architecture.md](/Users/dxk/code/product/silicon-sync/docs/architecture.md)
+
+### Storage
+
+Workers KV stores:
+
+- the latest snapshot for each source
+- the latest sync run summary
+- the sync cursor for batched scheduled execution
+
+### Scheduling
+
+- cron trigger every 3 hours
+- batched sync to stay under Worker subrequest limits
+- manual sync supported via authenticated `POST /api/sync`
+
+## Source Ingestion Strategy
+
+Silicon Sync does not use one generic crawler for everything. Each source is assigned an explicit ingestion mode.
+
+### `rss_feed`
+
+Used for sources with stable public feeds.
+
+Examples:
+
+- Lenny's Newsletter
+- Lenny's Podcast
+- Latent Space
+- Y Combinator Blog
+
+### `xml_sitemap`
+
+Used for sites with stable publisher-managed sitemap indexes.
+
+Examples:
+
+- a16z
+- Sequoia
+- Lightspeed
+- a16z Podcast Network
+
+### `official_api`
+
+Used when public HTML is protected or unstable but a vendor API is available.
+
+Examples:
+
+- Product Hunt
+
+### `page_data`
+
+Used for modern application shells that expose structured data separately from rendered pages.
+
+Examples:
+
+- NFX
+
+### `manual_curated`
+
+Used when no stable automated public entry point exists.
+
+Examples:
+
+- Benchmark
+
+## Current Coverage
+
+### Tech
+
+- Hacker News
+- Product Hunt
+- Y Combinator Launches
+- TechCrunch
+- Lenny's Newsletter
+- Lenny's Podcast
+- Latent Space
+- First Round Review
+- Y Combinator Blog
+
+### VC
+
+- Crunchbase News
+- a16z
+- a16z Podcast Network
+- Sequoia
+- Lightspeed
+- NFX
+- Benchmark (manual curated)
+
+## Freshness Model
+
+Silicon Sync is built around a rolling recent window, but not every source publishes daily.
+
+Current behavior:
+
+- if a source has matching content from the last 24 hours, that content is returned first
+- if a source has no fresh entries, Silicon Sync backfills the most recent available entries
+- KV keys expire shortly after the 24-hour window to avoid indefinite drift
+
+This gives downstream agents two useful properties:
+
+- recent sources stay fresh
+- low-frequency sources never collapse into empty feeds
+
+## Public Interface
+
+### Root
+
+- `GET /`
+
+Returns a human-facing landing page describing the project and linking into the APIs.
+
+### Source Registry
+
+- `GET /api/sources`
+- `GET /api/sources/:id`
+
+Returns source metadata plus the latest snapshot summary.
+
+### Documents
+
+- `GET /api/documents`
+- `GET /api/sources/:id/documents`
+
+Returns normalized `article` and `podcast` documents.
+
+### Links
+
+- `GET /api/sources/:id/links`
+
+Returns outbound links extracted from the latest source snapshot.
+
+### Operations
+
+- `GET /api/runs/latest`
+- `POST /api/sync`
+
+Returns or triggers sync operations.
+
+For the precise wire shape, see [docs/api.md](/Users/dxk/code/product/silicon-sync/docs/api.md).
+
+## Local Development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run locally:
+
+```bash
+npm run dev
+```
+
+Type-check by using Wrangler’s generated types:
+
+```bash
+npx tsc --noEmit
+```
+
+## Deployment
+
+Deploy the Worker:
+
+```bash
+npm run deploy
+```
+
+Required runtime pieces:
+
+- Cloudflare Workers
+- Workers KV
+- a cron trigger
+
+Optional secrets:
+
+- `SYNC_TOKEN`
+  Used for authenticated manual syncs.
+- `PRODUCT_HUNT_TOKEN`
+  Used for Product Hunt GraphQL ingestion.
+
+These secrets must stay out of git. They belong in Worker secrets and/or a local secret store.
+
+## Repository Status
+
+This repo is intentionally narrow.
+
+What is already in place:
+
+- scheduled source crawling
+- source-specific ingestion paths
+- rolling source snapshots
+- minimal document output
+- NYT-style landing page
+- public JSON endpoints
+
+What is intentionally not in place yet:
+
+- embeddings
+- semantic search
+- entity extraction
+- topic clustering
+- long-term historical archives
+- user accounts
+- billing
+
+## Roadmap
+
+Likely next steps:
+
+1. distinguish `recent` vs `backfill` documents explicitly in output
+2. tighten source-specific parsers further for YC Launches, TechCrunch, and podcast networks
+3. add lightweight history without losing the low-cost runtime model
+4. expose MCP-style resources or agent-oriented retrieval helpers
+
+## Philosophy
+
+Silicon Sync is not trying to be another news reader.
+
+It is trying to be a durable intermediate layer between the open web and agentic reasoning:
+
+- closer to the sources than a summary product
+- more structured than raw web pages
+- cheaper and simpler than a full data platform
+
+That constraint is deliberate.
