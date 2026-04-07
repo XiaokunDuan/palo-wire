@@ -123,6 +123,7 @@ type FeedEntry = {
   published_at: string | null;
   author: string | null;
   summary: string | null;
+  content_html?: string | null;
 };
 
 type SitemapEntry = {
@@ -217,6 +218,10 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
+function unwrapCdata(value: string): string {
+  return value.replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i, "$1");
+}
+
 function extractTitle(markup: string): string | null {
   const title = extractTagContent(markup, /<title[^>]*>([\s\S]*?)<\/title>/i);
   return title ? decodeHtmlEntities(title) : null;
@@ -293,6 +298,167 @@ function cleanContentText(value: string): string {
   }
 
   return normalizeWhitespace(deduped.join(" "));
+}
+
+function stripMarkdown(value: string): string {
+  return normalizeWhitespace(
+    value
+      .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/[*_~`>]+/g, "")
+      .replace(/^\s*[-+]\s+/gm, "")
+      .replace(/^\s*\d+\.\s+/gm, ""),
+  );
+}
+
+function extractJsonScript(markup: string, scriptId: string): string | null {
+  const match = markup.match(new RegExp(`<script[^>]+id=["']${scriptId}["'][^>]*>([\\s\\S]*?)<\\/script>`, "i"));
+  return match?.[1] ? decodeHtmlEntities(match[1]) : null;
+}
+
+function extractA16zArticleContent(markup: string): string {
+  const marker = markup.indexOf("js-article-content");
+  if (marker < 0) {
+    return "";
+  }
+
+  const start = markup.indexOf(">", marker);
+  if (start < 0) {
+    return "";
+  }
+
+  let slice = markup.slice(start + 1);
+  const stopMarkers = [
+    "You may also like",
+    "Related Posts",
+    "Up Next",
+    "<footer",
+  ];
+
+  for (const stopMarker of stopMarkers) {
+    const index = slice.indexOf(stopMarker);
+    if (index > 0) {
+      slice = slice.slice(0, index);
+      break;
+    }
+  }
+
+  return stripTags(slice);
+}
+
+function extractNfxArticleContent(markup: string): string {
+  const nextData = extractJsonScript(markup, "__NEXT_DATA__");
+  if (nextData) {
+    try {
+      const payload = JSON.parse(nextData) as {
+        props?: {
+          pageProps?: {
+            post?: {
+              content?: { rendered?: string };
+            };
+          };
+        };
+      };
+
+      const rendered = payload.props?.pageProps?.post?.content?.rendered;
+      if (rendered) {
+        return stripTags(rendered);
+      }
+    } catch {
+      // Fall through to HTML extraction below.
+    }
+  }
+
+  const marker = markup.indexOf("post_post__");
+  if (marker < 0) {
+    return "";
+  }
+
+  const start = markup.indexOf(">", marker);
+  if (start < 0) {
+    return "";
+  }
+
+  return stripTags(markup.slice(start + 1));
+}
+
+function buildYcLaunchDocument(source: Source, entry: FeedEntry, page: PageDetails): StructuredDocument | null {
+  if (page.contentType.includes("application/json")) {
+    try {
+      const payload = JSON.parse(page.body) as {
+        id?: number;
+        title?: string;
+        tagline?: string;
+        body?: string;
+        created_at?: string;
+        url?: string;
+        company?: {
+          name?: string;
+          batch?: string;
+          industry?: string;
+          url?: string;
+        };
+      };
+
+      if (!payload.title || !payload.body) {
+        return null;
+      }
+
+      const content = cleanContentText(stripMarkdown(
+        `${payload.tagline ?? ""}\n\n${payload.body}\n\nCompany: ${payload.company?.name ?? "n/a"}\nBatch: ${payload.company?.batch ?? "n/a"}\nIndustry: ${payload.company?.industry ?? "n/a"}\nWebsite: ${payload.company?.url ?? "n/a"}`,
+      ));
+
+      return {
+        id: `${source.id}:${payload.id ?? entry.url}`,
+        source_id: source.id,
+        source_name: source.name,
+        document_type: "article",
+        title: cleanDocumentTitle(payload.title),
+        url: page.finalUrl,
+        content,
+        published_at: payload.created_at ? new Date(payload.created_at).toISOString() : (entry.published_at ?? null),
+        fetched_at: new Date().toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const title = cleanDocumentTitle(
+    (page.pageTitle ?? entry.title)
+      .replace(/^Launch YC:\s*/i, "")
+      .replace(/\s+\|\s+Y Combinator$/i, ""),
+  );
+  const rawExcerpt = (() => {
+    const raw = page.rawText || "";
+    const titleIndex = raw.lastIndexOf(title);
+    if (titleIndex >= 0) {
+      return raw.slice(titleIndex + title.length).slice(0, 2200);
+    }
+    return raw.slice(0, 2200);
+  })();
+  const content = cleanContentText(page.metaDescription || entry.summary || rawExcerpt);
+  if (!title || !content) {
+    return null;
+  }
+
+  return {
+    id: `${source.id}:${entry.url}`,
+    source_id: source.id,
+    source_name: source.name,
+    document_type: "article",
+    title,
+    url: page.finalUrl,
+    content,
+    published_at: entry.published_at ? new Date(entry.published_at).toISOString() : null,
+    fetched_at: new Date().toISOString(),
+  };
+}
+
+function isLennyPodcastEntry(entry: FeedEntry): boolean {
+  const haystack = `${entry.title} ${entry.summary ?? ""} ${entry.content_html ?? ""}`.toLowerCase();
+  return /(^|[\s])🎙️|how i ai|podcast network|listen now:|podcasts\.apple\.com|open\.spotify\.com|youtube\.com\/@howiaipodcast|episode/i.test(haystack);
 }
 
 function extractLinks(markup: string, contentType: string, baseUrl: string): SourceLink[] {
@@ -435,17 +601,18 @@ function parseRssItems(xml: string): FeedEntry[] {
 
   return items.map((match) => {
     const block = match[0];
-    const title = decodeHtmlEntities(extractTagContent(block, /<title>([\s\S]*?)<\/title>/i) ?? "");
+    const title = decodeHtmlEntities(unwrapCdata(extractTagContent(block, /<title>([\s\S]*?)<\/title>/i) ?? ""));
     const url = decodeHtmlEntities(extractTagContent(block, /<link>([\s\S]*?)<\/link>/i) ?? "");
     const publishedAt = extractTagContent(block, /<pubDate>([\s\S]*?)<\/pubDate>/i);
     const author =
-      decodeHtmlEntities(extractTagContent(block, /<dc:creator><!\[CDATA\[([\s\S]*?)\]\]><\/dc:creator>/i) ?? "")
+      decodeHtmlEntities(unwrapCdata(extractTagContent(block, /<dc:creator>([\s\S]*?)<\/dc:creator>/i) ?? ""))
       || decodeHtmlEntities(extractTagContent(block, /<author>([\s\S]*?)<\/author>/i) ?? "")
       || null;
     const summary =
-      decodeHtmlEntities(stripTags(extractTagContent(block, /<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ?? ""))
+      decodeHtmlEntities(stripTags(unwrapCdata(extractTagContent(block, /<description>([\s\S]*?)<\/description>/i) ?? "")))
       || decodeHtmlEntities(stripTags(extractTagContent(block, /<description>([\s\S]*?)<\/description>/i) ?? ""))
       || null;
+    const contentHtml = unwrapCdata(extractTagContent(block, /<content:encoded>([\s\S]*?)<\/content:encoded>/i) ?? "") || null;
 
     return {
       title,
@@ -453,6 +620,7 @@ function parseRssItems(xml: string): FeedEntry[] {
       published_at: publishedAt ? new Date(publishedAt).toISOString() : null,
       author: author || null,
       summary: summary || null,
+      content_html: contentHtml,
     };
   }).filter((item) => item.url && item.title);
 }
@@ -464,9 +632,13 @@ function detectDocumentType(page: PageDetails, entry: FeedEntry): DocumentType {
     : "article";
 }
 
-function buildContent(documentType: DocumentType, page: PageDetails, entry: FeedEntry): string {
+function buildContent(source: Source, documentType: DocumentType, page: PageDetails, entry: FeedEntry): string {
   const summary = page.metaDescription || entry.summary || "";
-  const body = extractPrimaryContent(page.body) || page.rawText;
+  const body = source.id === "a16z"
+    ? extractA16zArticleContent(page.body) || extractPrimaryContent(page.body) || page.rawText
+    : source.id === "nfx"
+      ? extractNfxArticleContent(page.body) || extractPrimaryContent(page.body) || page.rawText
+      : extractPrimaryContent(page.body) || page.rawText;
 
   if (documentType === "podcast") {
     return normalizeWhitespace(`${summary}\n\n${body}`).slice(0, 14000);
@@ -508,11 +680,15 @@ function isLowQualityDocument(source: Source, title: string, url: string, conten
 
   if (source.id === "a16z" || source.id === "nfx") {
     const prefix = content.slice(0, 220).toLowerCase();
-    return /(portfolio team focus areas|content content team team companies companies|open menu team)/i.test(prefix);
+    return /(portfolio team focus areas|content content team team companies companies|open menu team|we are a vc firm investing in pre-seed)/i.test(prefix);
   }
 
   if (source.id === "lenny-podcast") {
-    return /subscribe sign in\s+how i ai/i.test(content.slice(0, 180));
+    return /subscribe sign in\s+how i ai/i.test(content.slice(0, 180)) || !/(podcast|how i ai|listen now|apple|spotify|youtube)/i.test(`${title} ${content}`);
+  }
+
+  if (source.id === "lenny-newsletter") {
+    return /(how i ai|podcast network|listen now:|podcasts\.apple\.com|open\.spotify\.com)/i.test(`${title} ${content}`);
   }
 
   if (source.id === "a16z-podcast-network") {
@@ -614,6 +790,9 @@ function extractInternalArticleCandidates(source: Source, links: SourceLink[]): 
 async function buildDocumentFromEntry(source: Source, entry: FeedEntry): Promise<StructuredDocument | null> {
   try {
     const page = await fetchMarkup(entry.url);
+    if (source.id === "yc-launches") {
+      return buildYcLaunchDocument(source, entry, page);
+    }
     const detectedType = detectDocumentType(page, entry);
 
     if (source.classification === "article" && detectedType !== "article") {
@@ -630,7 +809,7 @@ async function buildDocumentFromEntry(source: Source, entry: FeedEntry): Promise
     const title = page.pageTitle
       ? page.pageTitle.split(" - by ")[0]?.split(" | ")[0] ?? entry.title
       : entry.title;
-    const content = buildContent(documentType, page, entry);
+    const content = buildContent(source, documentType, page, entry);
     const publishedAt = entry.published_at || extractPublishedAt(page.body);
     const cleanedTitle = cleanDocumentTitle(title);
     const cleanedContent = cleanContentText(content);
@@ -694,7 +873,13 @@ async function fetchDocumentsFromFeed(source: Source): Promise<StructuredDocumen
   });
 
   const xml = await response.text();
-  const entries = parseRssItems(xml).slice(0, source.entry_limit ?? 5);
+  const entries = parseRssItems(xml)
+    .filter((entry) => source.id === "lenny-podcast"
+      ? isLennyPodcastEntry(entry)
+      : source.id === "lenny-newsletter"
+        ? !isLennyPodcastEntry(entry)
+        : true)
+    .slice(0, source.entry_limit ?? 5);
   const documents = await Promise.all(entries.map(async (entry) => {
     const full = await buildDocumentFromEntry(source, entry);
     return full ?? buildSummaryOnlyDocument(source, entry);
@@ -738,12 +923,16 @@ async function resolveSitemapUrls(source: Source): Promise<string[]> {
 async function fetchDocumentsFromSitemaps(source: Source): Promise<StructuredDocument[]> {
   const sitemapUrls = await resolveSitemapUrls(source);
   const sitemapXmls = await Promise.all(sitemapUrls.map((url) => fetchXml(url)));
-  const recentEntries = sitemapXmls
+  const entries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => isWithinLastDay(entry.lastmod))
-    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
-    .slice(0, source.entry_limit ?? 5);
+    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime());
+  const freshEntries = entries.filter((entry) => isWithinLastDay(entry.lastmod));
+  const recentEntries = (source.id === "yc-launches"
+    ? entries
+    : freshEntries.length > 0
+      ? freshEntries
+      : entries).slice(0, source.entry_limit ?? 5);
 
   const documents = await Promise.all(
     recentEntries.map((entry) =>
@@ -767,12 +956,12 @@ function extractNfxBuildId(markup: string): string | null {
 
 async function fetchNfxDocuments(source: Source): Promise<StructuredDocument[]> {
   const sitemapXmls = await Promise.all((source.sitemap_urls ?? []).map((url) => fetchXml(url)));
-  const recentEntries = sitemapXmls
+  const entries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => isWithinLastDay(entry.lastmod))
     .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
-    .slice(0, source.entry_limit ?? 5);
+  const freshEntries = entries.filter((entry) => isWithinLastDay(entry.lastmod));
+  const recentEntries = (freshEntries.length > 0 ? freshEntries : entries).slice(0, source.entry_limit ?? 5);
 
   let metadata = new Map<string, { title: string; summary: string | null }>();
 
@@ -915,7 +1104,7 @@ async function fetchA16zPodcastShows(source: Source): Promise<StructuredDocument
     showLinks.map(async (url) => {
       const details = await fetchMarkup(url);
       const title = details.pageTitle?.split(" | ")[0] ?? url;
-      const content = buildContent("podcast", details, {
+      const content = buildContent(source, "podcast", details, {
         title,
         url,
         published_at: null,
@@ -1444,335 +1633,166 @@ function renderLanding(): string {
     >
     <style>
       :root {
-        --bg: #000000;
-        --ink: #ffffff;
-        --muted: #a1a1a1;
-        --rule: #333333;
-        --accent: #e8ff00;
-        --accent-alt: #ff00ff;
-        --panel: #0a0a0a;
+        /* Pretext-inspired palette */
+        --bg-base: #F7F4EF; /* Classic editorial off-white/cream */
+        --bg-surface: #FFFFFF;
+        --bg-surface-hover: #FCFAF8;
+        --ink: #1A1A1A;
+        --ink-subtle: #666666;
+        --border: rgba(0, 0, 0, 0.08); /* Very subtle fine lines */
+        --border-hover: rgba(0, 0, 0, 0.15);
+        --accent: #A0522D; /* Earthy editorial orange-brown */
+        --accent-glow: rgba(160, 82, 45, 0.15);
+        
+        --radius-card: 32px;
+        --radius-pill: 100px;
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        background: var(--bg);
+        background: var(--bg-base);
         color: var(--ink);
-        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        /* Clean body font, fallback to system sans */
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
         -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+      }
+      
+      /* Subtle spatial vignette instead of neon spread */
+      body::before {
+        content: '';
+        position: absolute;
+        top: -20%; left: -10%; width: 50%; height: 60%;
+        background: radial-gradient(circle, #ffffff 0%, transparent 60%);
+        filter: blur(100px); opacity: 0.6; z-index: -1; pointer-events: none;
       }
       a { color: inherit; text-decoration: none; }
+      
       .page {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 0 20px 80px;
+        max-width: 1200px; margin: 0 auto; padding: 100px 40px 160px;
+        position: relative; z-index: 1;
       }
-      .masthead {
-        border-bottom: 2px solid var(--rule);
-        padding: 24px 0 32px;
-        text-align: left;
-      }
+      
+      /* Masthead */
+      .masthead { padding: 0 0 60px; border: none; text-align: left; }
       .masthead-top {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 20px;
-        margin-bottom: 24px;
-        color: var(--muted);
-        font: 11px/1.2 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.15em;
-        font-weight: 800;
+        display: inline-flex; gap: 24px; margin-bottom: 32px; padding: 8px 24px;
+        color: var(--accent); background: var(--bg-surface);
+        border: 1px solid var(--border); border-radius: var(--radius-pill);
+        font: 12px/1 'Inter', sans-serif; font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.1em;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.02);
       }
-      .masthead-top span {
-        border-right: 2px solid var(--rule);
-        padding-right: 20px;
-      }
-      .masthead-top span:last-child { border: none; }
+      .masthead-top span { border-right: 1px solid var(--border); padding-right: 24px; }
+      .masthead-top span:last-child { border: none; padding-right: 0; }
+      
       .brand {
-        margin: 0;
-        font-size: clamp(60px, 11vw, 130px);
-        line-height: 0.85;
-        letter-spacing: -0.06em;
-        font-weight: 900;
-        text-transform: uppercase;
+        margin: 0; 
+        /* Editorial Serif */
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: clamp(60px, 10vw, 110px);
+        line-height: 0.9;
+        letter-spacing: -0.02em; 
+        font-weight: 400; 
         color: var(--ink);
-        display: inline-block;
-        background: linear-gradient(90deg, var(--accent), var(--accent-alt));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
       }
       .subhead {
-        max-width: 760px;
-        margin: 24px 0 0;
-        color: var(--muted);
-        font-size: 18px;
-        line-height: 1.6;
-        font-weight: 500;
+        max-width: 700px; margin: 32px 0 0; color: var(--ink-subtle);
+        font-size: 20px; line-height: 1.6; font-weight: 400;
       }
+      
+      /* Layout grids */
       .hero {
-        display: grid;
-        grid-template-columns: 1fr 0.8fr;
-        gap: 0;
-        padding: 40px 0;
-        border-bottom: 2px solid var(--rule);
+        display: grid; grid-template-columns: 1fr 0.8fr; gap: 80px;
+        padding: 60px 0; border-bottom: 1px solid var(--border);
       }
-      .hero-main {
-        padding-right: 48px;
-        border-right: 2px solid var(--rule);
+      .hero-main { padding-right: 0; border-right: none; }
+      .hero-side { padding-left: 0; }
+      
+      .hero h2 { 
+        margin: 0; 
+        font-size: clamp(32px, 5vw, 48px); 
+        font-weight: 600; 
+        letter-spacing: -0.02em; 
+        line-height: 1.1; 
       }
+      .hero p { margin: 24px 0 0; font-size: 18px; line-height: 1.6; color: var(--ink-subtle); }
+      
+      /* Pills */
       .eyebrow {
-        display: inline-block;
-        margin-bottom: 20px;
-        background: var(--accent);
-        color: #000;
-        padding: 6px 10px;
-        font: 13px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        font-weight: 900;
-      }
-      .hero h2 {
-        margin: 0;
-        font-size: clamp(36px, 6vw, 60px);
-        line-height: 0.95;
-        letter-spacing: -0.04em;
-        font-weight: 900;
-      }
-      .hero p {
-        margin: 24px 0 0;
-        font-size: 20px;
-        line-height: 1.6;
-        color: #cccccc;
-      }
-      .hero-side {
-        display: grid;
-        gap: 0;
-        align-content: start;
-        padding-left: 48px;
-      }
-      .dek, .source-card {
+        display: inline-block; margin-bottom: 24px;
+        color: var(--accent); border: 1px solid var(--accent); border-radius: var(--radius-pill); 
+        padding: 6px 12px; font: 11px/1 sans-serif;
+        text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
         background: transparent;
-        border: none;
       }
-      .dek {
-        padding: 0 0 32px 0;
-        border-bottom: 2px solid var(--rule);
-        margin-bottom: 32px;
-      }
-      .dek:last-child { border: none; margin: 0; padding: 0; }
-      .dek h3, .section h3, .source-card h3 {
-        margin: 0 0 12px;
-        font-size: 28px;
-        font-weight: 800;
-        letter-spacing: -0.03em;
-        line-height: 1.1;
-      }
-      .dek p, .section p, .source-card p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 16px;
-        line-height: 1.6;
-      }
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        margin-top: 40px;
-      }
+      
+      .actions { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 40px; }
       .button {
-        padding: 16px 24px;
-        font: 14px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        font-weight: 900;
-        border: 2px solid var(--ink);
-        background: var(--ink);
-        color: var(--bg);
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        padding: 16px 28px; font: 14px/1 sans-serif; font-weight: 600; 
+        border: 1px solid var(--ink); border-radius: var(--radius-pill);
+        background: var(--ink); color: var(--bg-base); transition: all 0.2s ease;
       }
-      .button:hover {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: #000;
-        transform: translate(-2px, -2px);
-        box-shadow: 4px 4px 0 var(--accent-alt);
-      }
-      .button.secondary {
-        background: transparent;
-        color: var(--ink);
-      }
-      .button.secondary:hover {
-        background: var(--ink);
-        color: var(--bg);
-        transform: translate(-2px, -2px);
-        box-shadow: 4px 4px 0 var(--accent);
-      }
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        background: var(--panel);
-        border: 2px solid var(--rule);
-        margin-top: 40px;
-      }
+      .button:hover { background: #000; transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15); }
+      .button.secondary { background: var(--bg-surface); color: var(--ink); border: 1px solid var(--border); }
+      .button.secondary:hover { background: var(--bg-surface-hover); border-color: var(--border-hover); box-shadow: 0 4px 16px rgba(0,0,0,0.05); }
+      
+      /* Stats */
+      .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; margin-top: 80px; }
       .stat {
-        padding: 32px 24px;
-        text-align: left;
-        border-right: 2px solid var(--rule);
+        padding: 40px 32px; text-align: left; background: var(--bg-surface);
+        border: 1px solid var(--border); border-radius: var(--radius-card);
+        box-shadow: 0 4px 20px rgba(0,0,0,0.02);
       }
-      .stat:last-child { border-right: 0; }
-      .stat strong {
-        display: block;
-        font-size: clamp(32px, 5vw, 48px);
-        line-height: 1;
-        font-weight: 900;
-        letter-spacing: -0.04em;
-        color: var(--accent);
-      }
-      .stat span {
-        display: block;
-        margin-top: 12px;
-        color: var(--muted);
-        font: 12px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.15em;
-        font-weight: 800;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 64px;
-        padding-top: 64px;
-      }
-      .section {
-        padding-top: 0;
-        border: none;
-      }
-      .list {
-        list-style: none;
-        margin: 24px 0 0;
-        padding: 0;
-      }
+      .stat strong { display: block; font-size: clamp(36px, 5vw, 56px); font-weight: 500; letter-spacing: -0.03em; color: var(--ink); line-height: 1; }
+      .stat span { display: block; margin-top: 16px; color: var(--accent); font: 12px/1 sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; }
+      
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; padding-top: 80px; }
+      
+      /* Sections */
+      .section { padding: 48px 40px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--bg-surface); box-shadow: 0 4px 20px rgba(0,0,0,0.02); }
+      
+      .section h3, .dek h3 { font-size: 28px; font-weight: 500; margin: 0 0 16px; letter-spacing: -0.02em; }
+      .section p, .dek p { font-size: 16px; line-height: 1.6; margin: 0; color: var(--ink-subtle); }
+      .dek { padding: 0 0 40px 0; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
+      .dek:last-child { border: none; margin: 0; padding: 0; }
+      
+      .list { list-style: none; margin: 32px 0 0; padding: 0; }
       .list li {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        padding: 16px 0;
-        border-bottom: 2px solid var(--rule);
-        font-size: 16px;
-        font-weight: 600;
-        align-items: center;
+        display: flex; justify-content: space-between; align-items: center; gap: 16px;
+        padding: 20px 0; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 500;
       }
-      .list li:first-child { border-top: 2px solid var(--rule); }
-      .list small {
-        color: var(--ink);
-        background: var(--rule);
-        padding: 4px 8px;
-        white-space: nowrap;
-        font: 11px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        font-weight: 900;
-      }
-      .sources {
-        margin-top: 80px;
-        padding-top: 64px;
-        border-top: 8px solid var(--accent-alt);
-      }
-      .sources-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 24px;
-        margin-top: 40px;
-      }
+      .list li:last-child { border: none; padding-bottom: 0; }
+      .list small { background: rgba(160, 82, 45, 0.08); color: var(--accent); padding: 4px 10px; font: 11px/1 sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-radius: var(--radius-pill); white-space: nowrap; }
+      
+      .sources { margin-top: 100px; padding-top: 100px; border-top: 1px solid var(--border); }
+      .sources-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 24px; margin-top: 48px; }
+      
+      /* Source cards purely Pretext flat/fine style */
       .source-card {
-        padding: 24px;
-        background: var(--panel);
-        border: 2px solid var(--rule);
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        padding: 40px 32px; background: var(--bg-surface); border: 1px solid var(--border);
+        border-radius: var(--radius-card); transition: all 0.3s ease;
       }
-      .source-card:hover {
-        border-color: var(--accent);
-        transform: translate(-4px, -4px);
-        box-shadow: 6px 6px 0 var(--accent);
-      }
-      .source-card h3 { font-size: 22px; font-weight: 900; }
-      .source-eyebrow, .source-meta {
-        color: var(--muted);
-        font: 11px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        font-weight: 800;
-      }
-      .source-eyebrow { margin-bottom: 16px; display: inline-block; color: var(--accent); }
-      .source-meta {
-        display: flex;
-        gap: 16px;
-        margin-top: 24px;
-        padding-top: 16px;
-        border-top: 2px solid var(--rule);
-      }
-      .footer {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        margin-top: 80px;
-        padding: 32px 0;
-        border-top: 2px solid var(--rule);
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-      }
+      
+      .source-card:hover { transform: translateY(-4px); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.06); border-color: var(--border-hover); }
+      
+      .source-card h3 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 12px; line-height: 1.2; }
+      .source-eyebrow { display: inline-block; margin-bottom: 20px; color: var(--accent); font: 11px/1 sans-serif; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+      .source-card p { font-size: 15px; font-weight: 400; color: var(--ink-subtle); margin: 0; line-height: 1.6; }
+      .source-meta { display: flex; gap: 20px; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--ink-subtle); font: 11px/1 sans-serif; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+      
+      .footer { display: flex; justify-content: space-between; margin-top: 120px; padding: 40px 0; border-top: 1px solid var(--border); color: var(--ink-subtle); font-size: 13px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; }
+      
       @media (max-width: 980px) {
-        .hero, .grid, .stats, .sources-grid {
-          grid-template-columns: 1fr;
-        }
-        .hero-main, .stat {
-          border-right: 0;
-          padding-right: 0;
-        }
-        .hero-side {
-          padding-left: 0;
-          margin-top: 48px;
-        }
-        .grid { gap: 48px; }
-        .stat { border-bottom: 2px solid var(--rule); }
-        .stat:last-child { border-bottom: none; }
+        .page { padding: 60px 24px 80px; }
+        .hero, .stats, .grid, .sources-grid { grid-template-columns: 1fr; gap: 40px; }
+        .hero-main { padding-right: 0; border-right: none; border-bottom: 1px solid var(--border); padding-bottom: 40px; margin-bottom: 40px; }
+        .hero-side { padding-left: 0; }
+        .brand { font-size: clamp(48px, 12vw, 80px); }
       }
-      @keyframes ticker {
-        0% { transform: translateX(100%); }
-        100% { transform: translateX(-100%); }
-      }
-      .ticker-wrap {
-        overflow: hidden;
-        background: var(--accent);
-        color: #000;
-        padding: 12px 0;
-        border-bottom: 2px solid var(--rule);
-        white-space: nowrap;
-        position: relative;
-        z-index: 100;
-      }
-      .ticker {
-        display: inline-block;
-        font: 14px/1 'Inter', sans-serif;
-        text-transform: uppercase;
-        font-weight: 900;
-        letter-spacing: 0.15em;
-        animation: ticker 20s linear infinite;
-      }
-      .source-card:nth-child(4n+1) { border-color: var(--accent-alt); }
-      .source-card:nth-child(4n+2) { border-color: var(--accent); }
-      .source-card:nth-child(4n+3) { border-color: #00ffff; }
-      .source-card:hover { background: #1a1a1a; }
     </style>
   </head>
   <body>
-    <div class="ticker-wrap">
-      <div class="ticker">
-        PALO WIRE // CUTTING EDGE SIGNAL DESK // ALWAYS ROLLING // AGENT NATIVE // PALO WIRE // SILICON VALLEY SURVEILLANCE // PALO WIRE // CUTTING EDGE SIGNAL DESK // ALWAYS ROLLING // AGENT NATIVE // PALO WIRE // SILICON VALLEY SURVEILLANCE //
-      </div>
-    </div>
     <div class="page">
       <header class="masthead">
         <div class="masthead-top">
