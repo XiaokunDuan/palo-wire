@@ -429,22 +429,6 @@ function matchesAnyPattern(value: string, patterns: string[] | undefined): boole
   return patterns.some((pattern) => value.includes(pattern));
 }
 
-function pickRecentOrLatestEntries<T extends { lastmod: string | null }>(
-  entries: T[],
-  limit: number,
-): T[] {
-  const sorted = [...entries].sort(
-    (left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime(),
-  );
-  const recent = sorted.filter((entry) => isWithinLastDay(entry.lastmod));
-
-  if (recent.length > 0) {
-    return recent.slice(0, limit);
-  }
-
-  return sorted.slice(0, limit);
-}
-
 function shouldIgnoreInternalLink(url: URL): boolean {
   const ignoredSegments = [
     "/about",
@@ -607,14 +591,15 @@ async function resolveSitemapUrls(source: Source): Promise<string[]> {
 async function fetchDocumentsFromSitemaps(source: Source): Promise<StructuredDocument[]> {
   const sitemapUrls = await resolveSitemapUrls(source);
   const sitemapXmls = await Promise.all(sitemapUrls.map((url) => fetchXml(url)));
-  const candidateEntries = sitemapXmls
+  const recentEntries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => Boolean(entry.url));
-  const selectedEntries = pickRecentOrLatestEntries(candidateEntries, source.entry_limit ?? 5);
+    .filter((entry) => isWithinLastDay(entry.lastmod))
+    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
+    .slice(0, source.entry_limit ?? 5);
 
   const documents = await Promise.all(
-    selectedEntries.map((entry) =>
+    recentEntries.map((entry) =>
       buildDocumentFromEntry(source, {
         title: entry.url,
         url: entry.url,
@@ -635,11 +620,12 @@ function extractNfxBuildId(markup: string): string | null {
 
 async function fetchNfxDocuments(source: Source): Promise<StructuredDocument[]> {
   const sitemapXmls = await Promise.all((source.sitemap_urls ?? []).map((url) => fetchXml(url)));
-  const candidateEntries = sitemapXmls
+  const recentEntries = sitemapXmls
     .flatMap((xml) => parseSitemapEntries(xml))
     .filter((entry) => matchesAnyPattern(entry.url, source.url_allowlist_patterns))
-    .filter((entry) => Boolean(entry.url));
-  const selectedEntries = pickRecentOrLatestEntries(candidateEntries, source.entry_limit ?? 5);
+    .filter((entry) => isWithinLastDay(entry.lastmod))
+    .sort((left, right) => new Date(right.lastmod ?? 0).getTime() - new Date(left.lastmod ?? 0).getTime())
+    .slice(0, source.entry_limit ?? 5);
 
   let metadata = new Map<string, { title: string; summary: string | null }>();
 
@@ -682,7 +668,7 @@ async function fetchNfxDocuments(source: Source): Promise<StructuredDocument[]> 
   }
 
   const documents = await Promise.all(
-    selectedEntries.map((entry) =>
+    recentEntries.map((entry) =>
       buildDocumentFromEntry(source, {
         title: metadata.get(entry.url)?.title ?? entry.url,
         url: entry.url,
@@ -1010,7 +996,14 @@ async function fetchSourceSnapshot(source: Source): Promise<SourceSnapshot> {
 
 async function syncSingleSource(env: Env, source: Source): Promise<SourceRunResult> {
   try {
-    const snapshot = await fetchSourceSnapshotWithEnv(source, env);
+    const previousSnapshot = await readSnapshot(env, source.id);
+    const nextSnapshot = await fetchSourceSnapshotWithEnv(source, env);
+    let snapshot = nextSnapshot;
+
+    if (nextSnapshot.document_count === 0 && (previousSnapshot?.document_count ?? 0) > 0) {
+      snapshot = previousSnapshot as SourceSnapshot;
+    }
+
     await env.SIGNAL_CACHE.put(`source:${source.id}:latest`, JSON.stringify(snapshot), {
       expirationTtl: KV_RETENTION_SECONDS,
     });
@@ -1193,22 +1186,23 @@ async function handleSourceDocuments(env: Env, sourceId: string): Promise<Respon
   }
 
   const snapshot = await readSnapshot(env, sourceId);
-  const items = snapshot?.documents ?? [];
+  const documents = (snapshot?.documents ?? []).map((item) => ({
+    id: item.id,
+    source_id: item.source_id,
+    source_name: item.source_name,
+    document_type: item.document_type,
+    title: item.title,
+    url: item.url,
+    content: item.content,
+    fetched_at: item.fetched_at,
+  }));
 
   return json({
     source,
     fetched_at: snapshot?.fetched_at ?? null,
-    items: items.map((item) => ({
-      id: item.id,
-      source_id: item.source_id,
-      source_name: item.source_name,
-      document_type: item.document_type,
-      title: item.title,
-      url: item.url,
-      content: item.content,
-      fetched_at: item.fetched_at,
-    })),
-    total: items.length,
+    items: documents,
+    documents,
+    total: documents.length,
   });
 }
 
@@ -1238,7 +1232,7 @@ async function handleDocuments(env: Env, url: URL): Promise<Response> {
     .slice(0, limit)
     .map(({ source_category: _sourceCategory, published_at: _publishedAt, ...item }) => item);
 
-  return json({ items, total: items.length });
+  return json({ items, documents: items, total: items.length });
 }
 
 function overview() {
