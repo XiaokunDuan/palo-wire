@@ -37,19 +37,15 @@ Current document shapes:
 - `article`
 - `podcast`
 
-Each item can include:
+Each item now keeps only:
 
 - `title`
+- `content`
 - `url`
-- `published_at`
-- `author`
-- `summary`
-- `raw_text`
-- `entities`
-- `topics`
-- `guest`
-- `show_notes`
-- `transcript`
+- `source_id`
+- `source_name`
+- `document_type`
+- `fetched_at`
 
 ### `GET /api/sources/:id/links`
 

@@ -13,7 +13,7 @@ Silicon Sync is an agent-native source node for tracking early Silicon Valley si
 
 - Periodically fetches configured public source pages
 - Extracts page title, meta description, text preview, and outbound links
-- Builds structured `article` and `podcast` documents for selected high-signal sources
+- Builds minimal `article` and `podcast` documents for selected high-signal sources
 - Stores the latest snapshot for each source in Workers KV
 - Exposes JSON endpoints for sources, snapshots, documents, links, and latest sync runs
 
@@ -73,3 +73,14 @@ The worker uses:
 - Workers KV for latest source snapshots
 - a cron trigger every 3 hours
 - an optional `SYNC_TOKEN` secret for manual sync
+
+## Document Shape
+
+Structured documents are intentionally minimal. Each item keeps only:
+
+- `title`
+- `content`
+- `url`
+- `source_id`
+- `source_name`
+- `document_type`

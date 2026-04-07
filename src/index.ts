@@ -41,20 +41,10 @@ type StructuredDocument = {
   id: string;
   source_id: string;
   source_name: string;
-  category: SourceCategory;
-  content_channel: SourceChannel;
   document_type: DocumentType;
   title: string;
   url: string;
-  published_at: string | null;
-  author: string | null;
-  guest: string | null;
-  summary: string | null;
-  show_notes: string | null;
-  transcript: string | null;
-  raw_text: string;
-  entities: string[];
-  topics: string[];
+  content: string;
   fetched_at: string;
 };
 
@@ -124,19 +114,6 @@ const allSources = [...(sourceRegistry as Source[])].sort((left, right) =>
   left.name.localeCompare(right.name),
 );
 
-const topicPatterns: Array<{ topic: string; pattern: RegExp }> = [
-  { topic: "ai", pattern: /\b(ai|artificial intelligence|llm|language model)\b/i },
-  { topic: "ai-agents", pattern: /\b(agent|agents|agentic)\b/i },
-  { topic: "devtools", pattern: /\b(devtools|developer tools|developer experience|dx)\b/i },
-  { topic: "startups", pattern: /\b(startup|founder|company building|seed)\b/i },
-  { topic: "vc", pattern: /\b(vc|venture|investor|funding|series a|series b)\b/i },
-  { topic: "growth", pattern: /\b(growth|distribution|go-to-market|gtm)\b/i },
-  { topic: "product", pattern: /\b(product strategy|product management|product-led)\b/i },
-  { topic: "infra", pattern: /\b(infra|infrastructure|platform|api)\b/i },
-  { topic: "models", pattern: /\b(model|post-training|inference|eval|fine-tuning)\b/i },
-  { topic: "open-source", pattern: /\b(open source|oss)\b/i },
-];
-
 function json(data: unknown, status = 200, maxAge = 60): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -198,26 +175,6 @@ function extractMetaDescription(markup: string): string | null {
     );
 
   return match?.[1] ? decodeHtmlEntities(normalizeWhitespace(match[1])) : null;
-}
-
-function extractMetaAuthor(markup: string): string | null {
-  const match = markup.match(
-    /<meta[^>]+name=["']author["'][^>]+content=["']([^"]+)["'][^>]*>/i,
-  )
-    ?? markup.match(
-      /<meta[^>]+property=["']article:author["'][^>]+content=["']([^"]+)["'][^>]*>/i,
-    );
-
-  return match?.[1] ? decodeHtmlEntities(normalizeWhitespace(match[1])) : null;
-}
-
-function extractPublishedAt(markup: string): string | null {
-  const match = markup.match(
-    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"]+)["'][^>]*>/i,
-  )
-    ?? markup.match(/<time[^>]+datetime=["']([^"]+)["'][^>]*>/i);
-
-  return match?.[1] ? normalizeWhitespace(match[1]) : null;
 }
 
 function extractLinks(markup: string, contentType: string, baseUrl: string): SourceLink[] {
@@ -340,68 +297,22 @@ function parseRssItems(xml: string): FeedEntry[] {
   }).filter((item) => item.url && item.title);
 }
 
-function extractEntities(text: string): string[] {
-  const candidates = new Set<string>();
-  const source = text.slice(0, 3000);
-  const blacklist = new Set([
-    "The",
-    "This",
-    "That",
-    "These",
-    "Those",
-    "And",
-    "For",
-    "With",
-    "From",
-    "You",
-    "Your",
-    "How",
-    "Why",
-  ]);
-
-  for (const match of source.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-zA-Z0-9&.-]+){0,3})\b/g)) {
-    const candidate = normalizeWhitespace(match[1] ?? "");
-    if (!candidate || blacklist.has(candidate) || candidate.length < 3) {
-      continue;
-    }
-
-    candidates.add(candidate);
-    if (candidates.size >= 12) {
-      break;
-    }
-  }
-
-  return [...candidates];
-}
-
-function extractTopics(text: string, source: Source, type: DocumentType): string[] {
-  const combined = `${text} ${source.name} ${source.planned_access}`;
-  const results = new Set<string>([source.content_channel, type]);
-
-  for (const entry of topicPatterns) {
-    if (entry.pattern.test(combined)) {
-      results.add(entry.topic);
-    }
-  }
-
-  return [...results];
-}
-
-function inferGuest(title: string, rawText: string): string | null {
-  const titleMatch = title.match(/\bwith\s+([^|:,-]+)/i);
-  if (titleMatch?.[1]) {
-    return normalizeWhitespace(titleMatch[1]);
-  }
-
-  const bylineMatch = rawText.match(/\b(?:guest|featuring)\s+([A-Z][A-Za-z]+\s+[A-Z][A-Za-z]+)/i);
-  return bylineMatch?.[1] ? normalizeWhitespace(bylineMatch[1]) : null;
-}
-
 function detectDocumentType(page: PageDetails, entry: FeedEntry): DocumentType {
   const combined = `${entry.title} ${entry.summary ?? ""} ${page.body.slice(0, 3000)}`;
   return /twitter:player|embed\/podcast|podcast|listen now|episode/i.test(combined)
     ? "podcast"
     : "article";
+}
+
+function buildContent(documentType: DocumentType, page: PageDetails, entry: FeedEntry): string {
+  const summary = page.metaDescription || entry.summary || "";
+  const body = page.rawText;
+
+  if (documentType === "podcast") {
+    return normalizeWhitespace(`${summary}\n\n${body}`).slice(0, 14000);
+  }
+
+  return normalizeWhitespace(`${summary}\n\n${body}`).slice(0, 14000);
 }
 
 async function buildDocumentFromEntry(source: Source, entry: FeedEntry): Promise<StructuredDocument | null> {
@@ -423,33 +334,16 @@ async function buildDocumentFromEntry(source: Source, entry: FeedEntry): Promise
     const title = page.pageTitle
       ? page.pageTitle.split(" - by ")[0]?.split(" | ")[0] ?? entry.title
       : entry.title;
-    const author = entry.author || extractMetaAuthor(page.body);
-    const publishedAt = entry.published_at || extractPublishedAt(page.body);
-    const summary = page.metaDescription || entry.summary;
-    const guest = documentType === "podcast" ? inferGuest(title, page.rawText) : null;
-    const showNotes = documentType === "podcast" ? summary : null;
-    const transcript = documentType === "podcast" ? page.rawText : null;
-    const rawText = page.rawText;
-    const combinedForAnalysis = `${title} ${summary ?? ""} ${rawText}`;
+    const content = buildContent(documentType, page, entry);
 
     return {
       id: `${source.id}:${entry.url}`,
       source_id: source.id,
       source_name: source.name,
-      category: source.category,
-      content_channel: source.content_channel,
       document_type: documentType,
       title: normalizeWhitespace(title),
       url: page.finalUrl,
-      published_at: publishedAt ? new Date(publishedAt).toISOString() : null,
-      author,
-      guest,
-      summary,
-      show_notes: showNotes,
-      transcript,
-      raw_text: rawText,
-      entities: extractEntities(combinedForAnalysis),
-      topics: extractTopics(combinedForAnalysis, source, documentType),
+      content,
       fetched_at: new Date().toISOString(),
     };
   } catch {
@@ -492,27 +386,22 @@ async function fetchA16zPodcastShows(source: Source): Promise<StructuredDocument
     showLinks.map(async (url) => {
       const details = await fetchMarkup(url);
       const title = details.pageTitle?.split(" | ")[0] ?? url;
-      const summary = details.metaDescription;
-      const combinedForAnalysis = `${title} ${summary ?? ""} ${details.rawText}`;
+      const content = buildContent("podcast", details, {
+        title,
+        url,
+        published_at: null,
+        author: null,
+        summary: details.metaDescription,
+      });
 
       return {
         id: `${source.id}:${url}`,
         source_id: source.id,
         source_name: source.name,
-        category: source.category,
-        content_channel: source.content_channel,
         document_type: "podcast" as const,
         title,
         url: details.finalUrl,
-        published_at: extractPublishedAt(details.body),
-        author: extractMetaAuthor(details.body),
-        guest: inferGuest(title, details.rawText),
-        summary,
-        show_notes: summary,
-        transcript: details.rawText,
-        raw_text: details.rawText,
-        entities: extractEntities(combinedForAnalysis),
-        topics: extractTopics(combinedForAnalysis, source, "podcast"),
+        content,
         fetched_at: new Date().toISOString(),
       };
     }),
@@ -729,19 +618,26 @@ async function handleDocuments(env: Env, url: URL): Promise<Response> {
   const sourceId = url.searchParams.get("source");
   const type = url.searchParams.get("type");
   const limit = Math.min(Number(url.searchParams.get("limit") ?? "30"), 100);
-  const snapshots = await Promise.all(allSources.map((source) => readSnapshot(env, source.id)));
+  const snapshots = await Promise.all(
+    allSources.map(async (source) => ({
+      source,
+      snapshot: await readSnapshot(env, source.id),
+    })),
+  );
 
   const items = snapshots
-    .flatMap((snapshot) => snapshot?.documents ?? [])
-    .filter((item) => (!category || item.category === category))
+    .flatMap(({ source, snapshot }) =>
+      (snapshot?.documents ?? []).map((item) => ({
+        ...item,
+        source_category: source.category,
+      })),
+    )
+    .filter((item) => (!category || item.source_category === category))
     .filter((item) => (!sourceId || item.source_id === sourceId))
     .filter((item) => (!type || item.document_type === type))
-    .sort((left, right) => {
-      const leftTime = new Date(left.published_at ?? left.fetched_at).getTime();
-      const rightTime = new Date(right.published_at ?? right.fetched_at).getTime();
-      return rightTime - leftTime;
-    })
-    .slice(0, limit);
+    .sort((left, right) => new Date(right.fetched_at).getTime() - new Date(left.fetched_at).getTime())
+    .slice(0, limit)
+    .map(({ source_category: _sourceCategory, ...item }) => item);
 
   return json({ items, total: items.length });
 }
