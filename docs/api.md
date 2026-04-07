@@ -26,10 +26,45 @@ Returns the full latest snapshot for a single source, including:
 - meta description
 - text preview
 - extracted links
+- structured documents when available
+
+### `GET /api/sources/:id/documents`
+
+Returns structured documents for a single source.
+
+Current document shapes:
+
+- `article`
+- `podcast`
+
+Each item can include:
+
+- `title`
+- `url`
+- `published_at`
+- `author`
+- `summary`
+- `raw_text`
+- `entities`
+- `topics`
+- `guest`
+- `show_notes`
+- `transcript`
 
 ### `GET /api/sources/:id/links`
 
 Returns only the extracted outbound links for a single source snapshot.
+
+### `GET /api/documents`
+
+Returns structured documents across all sources.
+
+Supported query params:
+
+- `type=article|podcast`
+- `category=tech|vc`
+- `source=<source id>`
+- `limit=<n>`
 
 ### `GET /api/runs/latest`
 
@@ -48,6 +83,7 @@ Authentication:
 This API is designed for agents that need to:
 
 - pull the latest source snapshots
+- pull normalized article and podcast documents
 - inspect extracted links
 - monitor sync success or failure
 - use Silicon Sync as a pre-crawled source layer before deeper summarization

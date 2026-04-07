@@ -13,8 +13,9 @@ Silicon Sync is an agent-native source node for tracking early Silicon Valley si
 
 - Periodically fetches configured public source pages
 - Extracts page title, meta description, text preview, and outbound links
+- Builds structured `article` and `podcast` documents for selected high-signal sources
 - Stores the latest snapshot for each source in Workers KV
-- Exposes JSON endpoints for sources, snapshots, links, and latest sync runs
+- Exposes JSON endpoints for sources, snapshots, documents, links, and latest sync runs
 
 ## Current Coverage
 
@@ -28,13 +29,21 @@ Silicon Sync is an agent-native source node for tracking early Silicon Valley si
 - Lightspeed
 - Benchmark
 - NFX
+- Lenny's Newsletter
+- Lenny's Podcast
+- Latent Space
+- a16z Podcast Network
+- First Round Review
+- Y Combinator Blog
 
 ## API
 
 - `GET /`
 - `GET /api/sources`
 - `GET /api/sources/:id`
+- `GET /api/sources/:id/documents`
 - `GET /api/sources/:id/links`
+- `GET /api/documents`
 - `GET /api/runs/latest`
 - `POST /api/sync`
 
